@@ -1,4 +1,4 @@
-/*
+ /*
  ____  _____ _        _    
 | __ )| ____| |      / \   
 |  _ \|  _| | |     / _ \  
@@ -50,7 +50,7 @@ float *gWindowBuffer;
 // These variables used internally in the example:
 const int gFFTSize = 4096;
 int gHopSize = 1024;
-int gPeriod = 512;
+int gPeriod = 1024;
 FreezeFft gFreezeFft[gFFTSize];
 float omega[gFFTSize] = {0};
 float gFFTScaleFactor = 0;
@@ -141,19 +141,26 @@ float princarg(float phase)
 }
 
 
+unsigned int gLed1Out = 4;
+
 // userData holds an opaque pointer to a data structure that was passed
 // in from the call to initAudio().
 //
 // Return true on success; returning false halts the program.
 bool setup(BelaContext* context, void* userData)
 {
+	pinMode(context, 0, 2, OUTPUT);
+	pinMode(context, 0, 3, OUTPUT);
+	pinMode(context, 0, gLed1Out, OUTPUT);
+	pinMode(context, 0, gLed1Out + 1, OUTPUT);
+	digitalWrite(context, 0, 2, 0);
+	digitalWrite(context, 0, 3, 1);
     // Check that we have the same number of inputs and outputs.
 	if(context->audioInChannels != context->audioOutChannels ||
 			context->analogInChannels != context-> analogOutChannels){
 		printf("Error: for this project, you need the same number of input and output channels.\n");
 		return false;
 	}
-    
 	midi.readFrom(0);
 	midi.setParserCallback(midiCallback);
 	// Retrieve a parameter passed in from the initAudio() call
@@ -200,21 +207,39 @@ bool setup(BelaContext* context, void* userData)
 }
 
 bool gShouldFreeze = false;
+bool gFreezeReplace = true;
 // temp array where to store the phases for using vectorized sin/cos computations;
 float cosPh[gFFTSize];
 float sinPh[gFFTSize];
-
+float gFreezeTdIn[2][gFFTSize] = {{0}};
 
 // This function handles the FFT processing in this example once the buffer has
 // been assembled.
 void process_fft(float *inBuffer, int inWritePointer, float *outBuffer, int outWritePointer)
 {
-	static int gFreezeStatus = 0;
+	static int gFreezeStatus = -1;
 	if(gShouldFreeze)
 	{
 		gShouldFreeze = false;
 		gFreezeStatus = 0;
 	}
+	if(gFreezeStatus == 0 || gFreezeStatus == 1)
+	{
+		if(gFreezeReplace)
+		{
+			// store a copy of the input buffer for future adds
+			memcpy(gFreezeTdIn[gFreezeStatus], inBuffer, sizeof(float) * gFFTSize);
+		} else {
+			int pointer = (inWritePointer - gFFTSize + BUFFER_SIZE) % BUFFER_SIZE;
+			for(int n = 0; n < gFFTSize; n++) {
+				inBuffer[pointer] = gFreezeTdIn[gFreezeStatus][n] + inBuffer[pointer];
+				pointer++;
+				if(pointer >= BUFFER_SIZE)
+					pointer = 0;
+			}
+		}
+	}
+	
 	if(gEffect != kFreeze || gFreezeStatus < 2)
 	{
 		// Copy buffer into FFT input
@@ -346,12 +371,45 @@ void process_fft_background(void*) {
 // will be 0.
 void render(BelaContext* context, void* userData)
 {
-	
+    gDryWet = analogRead(context, 0, 0);
+	gPlaybackLive = analogRead(context, 0, 1);
+	static int count = 0;
+	count++;
+	if(count % 2000 == 0)
+	{
+		// rt_printf("In: %d %d", digitalRead(context, 0, 0), digitalRead(context, 0, 1));
+		// rt_printf("\n");
+	}	
+
 	float* audioOut = context->audioOut;
 	int numAudioFrames = context->audioFrames;
 	int numAudioChannels = context->audioOutChannels;
 	// ------ this code internal to the demo; leave as is ----------------
 
+	for(unsigned int n = 0; n < context->digitalFrames; ++n)
+	{
+		// receive trigger input
+		static int ledOn[2] = {0};
+		static bool oldIn[2] = {false};
+		int ledDuration = 5000;
+		int freezeTriggerIn = 0;
+		for(unsigned int c = 0; c < 2; ++c)
+		{
+			bool in = digitalRead(context, n, freezeTriggerIn + c);
+			if(in && !oldIn[c])
+			{
+				gFreezeReplace = c == 0 ? true : false;
+				gShouldFreeze = true;
+				ledOn[c] = ledDuration;
+				digitalWrite(context, n, gLed1Out + c, 1);
+			}
+			oldIn[c] = in;
+			--ledOn[c];
+			if(ledOn[c] == 0)
+				digitalWrite(context, n, gLed1Out + c, 0);
+		}
+	}
+	
 	// Prep the "input" to be the sound file played in a loop
 	for(int n = 0; n < numAudioFrames; n++) {
 		static int count = -gHopSize * 3;
@@ -360,8 +418,8 @@ void render(BelaContext* context, void* userData)
 		{
 			static int count = 0;
 			++count;
-			rt_printf("%d Freezing\n", count);
-			gShouldFreeze = true;
+			// rt_printf("%d Freezing\n", count);
+			// gShouldFreeze = true;
 		}
 		if(gReadPtr < gSampleData.sampleLen)
 			gInputAudio[2*n] = gInputAudio[2*n+1] = gSampleData.samples[gReadPtr]*(1-gPlaybackLive) +
